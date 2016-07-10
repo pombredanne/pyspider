@@ -10,10 +10,12 @@ import six
 import sys
 import imp
 import time
+import weakref
 import logging
 import inspect
+import traceback
 import linecache
-from pyspider.libs import base_handler
+from pyspider.libs import utils
 from pyspider.libs.log import SaveLogHandler, LogFormatter
 logger = logging.getLogger("processor")
 
@@ -29,6 +31,7 @@ class ProjectManager(object):
     @staticmethod
     def build_module(project, env={}):
         '''Build project script as module'''
+        from pyspider.libs import base_handler
         assert 'name' in project, 'need name of project'
         assert 'script' in project, 'need script of project'
 
@@ -75,6 +78,8 @@ class ProjectManager(object):
             'module': module,
             'class': _class,
             'instance': instance,
+            'exception': None,
+            'exception_log': '',
             'info': project,
             'load_time': time.time(),
         }
@@ -86,13 +91,15 @@ class ProjectManager(object):
         self.projects = {}
         self.last_check_projects = time.time()
 
-    def _need_update(self, project_name, updatetime=None):
+    def _need_update(self, project_name, updatetime=None, md5sum=None):
         '''Check if project_name need update'''
         if project_name not in self.projects:
             return True
-        if updatetime and updatetime > self.projects[project_name]['info'].get('updatetime', 0):
+        elif md5sum and md5sum != self.projects[project_name]['info'].get('md5sum'):
             return True
-        if time.time() - self.projects[project_name]['load_time'] > self.RELOAD_PROJECT_INTERVAL:
+        elif updatetime and updatetime > self.projects[project_name]['info'].get('updatetime', 0):
+            return True
+        elif time.time() - self.projects[project_name]['load_time'] > self.RELOAD_PROJECT_INTERVAL:
             return True
         return False
 
@@ -116,19 +123,31 @@ class ProjectManager(object):
     def _load_project(self, project):
         '''Load project into self.projects from project info dict'''
         try:
+            project['md5sum'] = utils.md5string(project['script'])
             ret = self.build_module(project, self.env)
             self.projects[project['name']] = ret
-        except Exception:
+        except Exception as e:
             logger.exception("load project %s error", project.get('name', None))
+            ret = {
+                'loader': None,
+                'module': None,
+                'class': None,
+                'instance': None,
+                'exception': e,
+                'exception_log': traceback.format_exc(),
+                'info': project,
+                'load_time': time.time(),
+            }
+            self.projects[project['name']] = ret
             return False
         logger.debug('project: %s updated.', project.get('name', None))
         return True
 
-    def get(self, project_name, updatetime=None):
+    def get(self, project_name, updatetime=None, md5sum=None):
         '''get project data object, return None if not exists'''
-        if time.time() - self.last_check_projects < self.CHECK_PROJECTS_INTERVAL:
+        if time.time() - self.last_check_projects > self.CHECK_PROJECTS_INTERVAL:
             self._check_projects()
-        if self._need_update(project_name, updatetime):
+        if self._need_update(project_name, updatetime, md5sum):
             self._update_project(project_name)
         return self.projects.get(project_name, None)
 
@@ -136,24 +155,35 @@ class ProjectManager(object):
 class ProjectFinder(object):
     '''ProjectFinder class for sys.meta_path'''
 
+    def __init__(self, projectdb):
+        self.get_projectdb = weakref.ref(projectdb)
+
+    @property
+    def projectdb(self):
+        return self.get_projectdb()
+
     def find_module(self, fullname, path=None):
         if fullname == 'projects':
-            return ProjectsLoader()
+            return self
         parts = fullname.split('.')
         if len(parts) == 2 and parts[0] == 'projects':
-            return self.get_loader(parts[1])
-
-
-class ProjectsLoader(object):
-    '''ProjectsLoader class for sys.meta_path package'''
+            name = parts[1]
+            if not self.projectdb:
+                return
+            info = self.projectdb.get(name)
+            if info:
+                return ProjectLoader(info)
 
     def load_module(self, fullname):
-        mod = sys.modules.setdefault('projects', imp.new_module(fullname))
+        mod = imp.new_module(fullname)
         mod.__file__ = '<projects>'
         mod.__loader__ = self
-        mod.__path__ = []
+        mod.__path__ = ['<projects>']
         mod.__package__ = 'projects'
         return mod
+
+    def is_package(self, fullname):
+        return True
 
 
 class ProjectLoader(object):
@@ -166,10 +196,9 @@ class ProjectLoader(object):
 
     def load_module(self, fullname):
         if self.mod is None:
-            mod = self.mod = imp.new_module(self.name)
+            self.mod = mod = imp.new_module(fullname)
         else:
             mod = self.mod
-
         mod.__file__ = '<%s>' % self.name
         mod.__loader__ = self
         mod.__project__ = self.project

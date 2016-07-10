@@ -31,13 +31,19 @@ class TestRun(unittest.TestCase):
 
         import tests.data_test_webpage
         import httpbin
-        self.httpbin_thread = utils.run_in_subprocess(httpbin.app.run, port=14887)
+        self.httpbin_thread = utils.run_in_subprocess(httpbin.app.run, port=14887, passthrough_errors=False)
         self.httpbin = 'http://127.0.0.1:14887'
 
     @classmethod
     def tearDownClass(self):
         self.httpbin_thread.terminate()
         self.httpbin_thread.join()
+
+        assert not utils.check_port_open(5000)
+        assert not utils.check_port_open(23333)
+        assert not utils.check_port_open(24444)
+        assert not utils.check_port_open(25555)
+        assert not utils.check_port_open(14887)
 
         shutil.rmtree('./data/tests', ignore_errors=True)
 
@@ -97,7 +103,7 @@ class TestRun(unittest.TestCase):
         finally:
             del os.environ['RESULTDB']
 
-    @unittest.skipIf(os.environ.get('IGNORE_RABBITMQ'), 'no rabbitmq server for test.')
+    @unittest.skipIf(os.environ.get('IGNORE_RABBITMQ') or os.environ.get('IGNORE_ALL'), 'no rabbitmq server for test.')
     def test_50_docker_rabbitmq(self):
         try:
             os.environ['RABBITMQ_NAME'] = 'rabbitmq'
@@ -116,7 +122,7 @@ class TestRun(unittest.TestCase):
             del os.environ['RABBITMQ_PORT_5672_TCP_ADDR']
             del os.environ['RABBITMQ_PORT_5672_TCP_PORT']
 
-    @unittest.skipIf(os.environ.get('IGNORE_MONGODB'), 'no mongodb server for test.')
+    @unittest.skipIf(os.environ.get('IGNORE_MONGODB') or os.environ.get('IGNORE_ALL'), 'no mongodb server for test.')
     def test_60_docker_mongodb(self):
         try:
             os.environ['MONGODB_NAME'] = 'mongodb'
@@ -133,7 +139,8 @@ class TestRun(unittest.TestCase):
             del os.environ['MONGODB_PORT_27017_TCP_ADDR']
             del os.environ['MONGODB_PORT_27017_TCP_PORT']
 
-    @unittest.skipIf(os.environ.get('IGNORE_MYSQL'), 'no mysql server for test.')
+    @unittest.skip('noly available in docker')
+    @unittest.skipIf(os.environ.get('IGNORE_MYSQL') or os.environ.get('IGNORE_ALL'), 'no mysql server for test.')
     def test_70_docker_mysql(self):
         try:
             os.environ['MYSQL_NAME'] = 'mysql'
@@ -153,7 +160,7 @@ class TestRun(unittest.TestCase):
     def test_80_docker_phantomjs(self):
         try:
             os.environ['PHANTOMJS_NAME'] = 'phantomjs'
-            os.environ['PHANTOMJS_PORT'] = 'tpc://binux:25678'
+            os.environ['PHANTOMJS_PORT_25555_TCP'] = 'tpc://binux:25678'
             ctx = run.cli.make_context('test', [], None,
                                        obj=dict(testing_mode=True))
             ctx = run.cli.invoke(ctx)
@@ -162,7 +169,7 @@ class TestRun(unittest.TestCase):
             self.assertIsNone(e)
         finally:
             del os.environ['PHANTOMJS_NAME']
-            del os.environ['PHANTOMJS_PORT']
+            del os.environ['PHANTOMJS_PORT_25555_TCP']
 
     def test_90_docker_scheduler(self):
         try:
@@ -192,13 +199,13 @@ class TestRun(unittest.TestCase):
             '--resultdb', 'sqlite+resultdb:///data/tests/all_test_result.db',
             '--projectdb', 'local+projectdb://'+inspect.getsourcefile(data_sample_handler),
             'all',
-        ], close_fds=True)
+        ], close_fds=True, preexec_fn=os.setsid)
 
 
         try:
             limit = 30
             while limit >= 0:
-                time.sleep(1)
+                time.sleep(3)
                 # click run
                 try:
                     requests.post('http://localhost:5000/run', data={
@@ -210,11 +217,11 @@ class TestRun(unittest.TestCase):
                 break
 
             limit = 30
-            data = requests.get('http://localhost:5000/counter?time=5m&type=sum')
+            data = requests.get('http://localhost:5000/counter')
             self.assertEqual(data.status_code, 200)
-            while data.json().get('data_sample_handler', {}).get('success', 0) < 5:
+            while data.json().get('data_sample_handler', {}).get('5m', {}).get('success', 0) < 5:
                 time.sleep(1)
-                data = requests.get('http://localhost:5000/counter?time=5m&type=sum')
+                data = requests.get('http://localhost:5000/counter')
                 limit -= 1
                 if limit <= 0:
                     break
@@ -226,10 +233,9 @@ class TestRun(unittest.TestCase):
         except:
             raise
         finally:
-            while p.returncode is None:
-                time.sleep(1)
-                p.send_signal(signal.SIGINT)
-                p.poll()
+            time.sleep(1)
+            os.killpg(p.pid, signal.SIGTERM)
+            p.wait()
 
     def test_a110_one(self):
         pid, fd = os.forkpty()
@@ -265,7 +271,7 @@ class TestRun(unittest.TestCase):
                     print(t, end='')
                 return ''.join(text)
 
-            text = wait_text()
+            text = wait_text(3)
             self.assertIn('new task data_sample_handler:on_start', text)
             self.assertIn('pyspider shell', text)
 
@@ -279,7 +285,10 @@ class TestRun(unittest.TestCase):
 
             os.write(fd, utils.utf8('crawl("%s/links/10/0")\n' % self.httpbin))
             text = wait_text()
-            self.assertIn('"title": "Links"', text)
+            if '"title": "Links"' not in text:
+                os.write(fd, utils.utf8('crawl("%s/links/10/1")\n' % self.httpbin))
+                text = wait_text()
+                self.assertIn('"title": "Links"', text)
 
             os.write(fd, utils.utf8('crawl("%s/404")\n' % self.httpbin))
             text = wait_text()
@@ -290,3 +299,51 @@ class TestRun(unittest.TestCase):
             self.assertIn('scheduler exiting...', text)
             os.close(fd)
             os.kill(pid, signal.SIGINT)
+
+class TestSendMessage(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(self):
+        shutil.rmtree('./data/tests', ignore_errors=True)
+        os.makedirs('./data/tests')
+
+        ctx = run.cli.make_context('test', [
+            '--taskdb', 'sqlite+taskdb:///data/tests/task.db',
+            '--projectdb', 'sqlite+projectdb:///data/tests/projectdb.db',
+            '--resultdb', 'sqlite+resultdb:///data/tests/resultdb.db',
+        ], None, obj=dict(testing_mode=True))
+        self.ctx = run.cli.invoke(ctx)
+
+        ctx = run.scheduler.make_context('scheduler', [], self.ctx)
+        scheduler = run.scheduler.invoke(ctx)
+        self.xmlrpc_thread = utils.run_in_thread(scheduler.xmlrpc_run)
+        self.scheduler_thread = utils.run_in_thread(scheduler.run)
+
+        time.sleep(1)
+
+    @classmethod
+    def tearDownClass(self):
+        for each in self.ctx.obj.instances:
+            each.quit()
+        self.xmlrpc_thread.join()
+        self.scheduler_thread.join()
+        time.sleep(1)
+
+        assert not utils.check_port_open(5000)
+        assert not utils.check_port_open(23333)
+        assert not utils.check_port_open(24444)
+        assert not utils.check_port_open(25555)
+
+        shutil.rmtree('./data/tests', ignore_errors=True)
+
+    def test_10_send_message(self):
+        ctx = run.send_message.make_context('send_message', [
+            'test_project', 'test_message'
+        ], self.ctx)
+        self.assertTrue(run.send_message.invoke(ctx))
+        while True:
+            task = self.ctx.obj.scheduler2fetcher.get(timeout=1)
+            if task['url'] == 'data:,on_message':
+                break
+        self.assertEqual(task['process']['callback'], '_on_message')
+

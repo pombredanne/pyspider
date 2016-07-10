@@ -36,6 +36,28 @@ body {
     margin-left: 10px;
     margin-right: 10px;
   }
+
+  .webdav-btn {
+    position: relative;
+    float: right;
+    padding: 1px 7px 0 7px;
+    line-height: 21px;
+    border-radius: 5px;
+    border: solid 1px @blue;
+    background: white;
+    color: @blue;
+    cursor: pointer;
+    margin: 6px 0 0 10px;
+
+    &:hover {
+      background: lighten(@blue, 10%);
+      color: white;
+    }
+    &.active {
+      background: @blue;
+      color: white;
+    }
+  }
 }
 
 #editarea {
@@ -116,7 +138,7 @@ body {
   bottom: 0;
   border-radius: 5px 0 0 0;
   padding: 5px 0 3px 0;
-  box-shadow: 0px 0px 30px @color;
+  /*box-shadow: 0px 0px 30px @color;*/
   overflow: hidden;
 
   &:hover {
@@ -197,11 +219,14 @@ body {
 }
 
 #debug-tabs {
-  position: relative;
   margin-bottom: 45px;
 }
 
 #tab-web {
+  &.fixed {
+    padding-top: 24px;
+  }
+
   iframe {
     border-width: 0;
     width: 100%;
@@ -261,8 +286,8 @@ body {
     }
     .task-run {
       position: absolute;
-      right: 0px;
-      top: 0px;
+      right: 0;
+      top: 0;
       font-size: 80%;
       padding: 0 10px 0 30px;
       float: right;
@@ -298,9 +323,6 @@ body {
 }
 
 #python-log {
-  z-index: 88;
-  position: absolute;
-  bottom: 0;
   width: 100%;
   min-height: 10px;
   max-height: 40%;
@@ -312,7 +334,7 @@ body {
     width: auto;
     padding-top: 5px;
     background: @red;
-    box-shadow: 0px 2px 20px @red;
+    box-shadow: 0 2px 20px @red;
     cursor: pointer;
   }
   pre {
@@ -320,4 +342,88 @@ body {
     padding: 10px 10px;
     color: white;
   }
+}
+
+#css-selector-helper {
+  background-color: @gray-lighter;
+  padding: 0;
+  width: 100%;
+  height: 24px;
+  text-align: right;
+  white-space: nowrap;
+
+  &.fixed {
+    position: absolute;
+    top: 0;
+
+  }
+
+  button {
+    line-height: 16px;
+    vertical-align: 2px;
+  }
+}
+
+span.element {
+  position: relative;
+  height: 24px;
+  display: inline-block;
+  padding: 0 0.2em;
+  cursor: pointer;
+  color: lighten(@gray, 35%);
+  z-index: 99999;
+
+  &.invalid {
+    display: none;
+  }
+  &.selected {
+    color: black;
+  }
+  &:hover {
+    background-color: darken(@gray-lighter, 15%);
+
+    & > ul {
+      display: block;
+    }
+  }
+
+  & > ul {
+    display: none;
+    margin: 0;
+    padding: 0;
+    position: absolute;
+    top: 24px;
+    left: 0;
+    background-color: @gray-lighter;
+    border: 1px solid black;
+    border-top-width: 0;
+    color: lighten(@gray, 35%);
+
+    & > li {
+      display: block;
+      text-align: left;
+      white-space: nowrap;
+      padding: 0 4px;
+
+      &.selected {
+        color: black;
+      }
+      &:hover {
+        background-color: darken(@gray-lighter, 15%);
+      }
+    }
+  }
+}
+
+.copy-selector-input {
+  height: 24px;
+  padding: 0;
+  border: 0;
+  margin: 0;
+  padding-right: 0.2em;
+  font-size: 1em;
+  text-align: right;
+  width: 100%;
+  margin-left: -100px;
+  background: @gray-lighter;
 }

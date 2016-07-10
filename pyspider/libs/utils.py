@@ -8,6 +8,7 @@
 import logging
 import hashlib
 import datetime
+import socket
 import base64
 
 import six
@@ -124,8 +125,8 @@ def format_date(date, gmt_offset=0, relative=True, shorter=False, full_format=Fa
         elif days < 5:
             format = "%(weekday)s" if shorter else "%(weekday)s at %(time)s"
         elif days < 334:  # 11mo, since confusing for same month last year
-            format = "%(month_name)s-%(day)s" if shorter else \
-                "%(month_name)s-%(day)s at %(time)s"
+            format = "%(month)s-%(day)s" if shorter else \
+                "%(month)s-%(day)s at %(time)s"
 
     if format is None:
         format = "%(month_name)s %(day)s, %(year)s" if shorter else \
@@ -134,10 +135,11 @@ def format_date(date, gmt_offset=0, relative=True, shorter=False, full_format=Fa
     str_time = "%d:%02d" % (local_date.hour, local_date.minute)
 
     return format % {
-        "month_name": local_date.month - 1,
-        "weekday": local_date.weekday(),
+        "month_name": local_date.strftime('%b'),
+        "weekday": local_date.strftime('%A'),
         "day": str(local_date.day),
         "year": str(local_date.year),
+        "month": local_date.month,
         "time": str_time
     }
 
@@ -200,7 +202,7 @@ def utf8(string):
     elif isinstance(string, six.binary_type):
         return string
     else:
-        return unicode(string).encode('utf8')
+        return six.text_type(string).encode('utf8')
 
 
 def text(string, encoding='utf8'):
@@ -226,7 +228,7 @@ def pretty_unicode(string):
     try:
         return string.decode("utf8")
     except UnicodeDecodeError:
-        return string.decode('Latin-1').encode('unicode_escape')
+        return string.decode('Latin-1').encode('unicode_escape').decode("utf8")
 
 
 def unicode_string(string):
@@ -249,7 +251,7 @@ def unicode_dict(_dict):
     """
     r = {}
     for k, v in iteritems(_dict):
-        r[unicode_string(k)] = unicode_obj(v)
+        r[unicode_obj(k)] = unicode_obj(v)
     return r
 
 
@@ -408,3 +410,12 @@ def python_console(namespace=None):
         namespace.update(caller.f_locals)
 
     return get_python_console(namespace=namespace).interact()
+
+
+def check_port_open(port, addr='127.0.0.1'):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    result = sock.connect_ex((addr, port))
+    if result == 0:
+        return True
+    else:
+        return False

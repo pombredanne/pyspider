@@ -13,47 +13,14 @@ import fractions
 import six
 from six import add_metaclass, iteritems
 
-from pyspider.libs.log import LogFormatter
-from pyspider.libs.url import quote_chinese, _build_url, _encode_params, _encode_multipart_formdata
-from pyspider.libs.utils import md5string, hide_me, pretty_unicode
+from pyspider.libs.url import (
+    quote_chinese, _build_url, _encode_params,
+    _encode_multipart_formdata, curl_to_arguments)
+from pyspider.libs.utils import md5string
 from pyspider.libs.ListIO import ListO
 from pyspider.libs.response import rebuild_response
 from pyspider.libs.pprint import pprint
-
-
-class ProcessorResult(object):
-    """The result and logs producted by a callback"""
-
-    def __init__(self, result, follows, messages, logs, exception, extinfo):
-        self.result = result
-        self.follows = follows
-        self.messages = messages
-        self.logs = logs
-        self.exception = exception
-        self.extinfo = extinfo
-
-    def rethrow(self):
-        """rethrow the exception"""
-
-        if self.exception:
-            raise self.exception
-
-    def logstr(self):
-        """handler the log records to formatted string"""
-
-        result = []
-        formater = LogFormatter(color=False)
-        for record in self.logs:
-            if isinstance(record, six.string_types):
-                result.append(pretty_unicode(record))
-            else:
-                if record.exc_info:
-                    a, b, tb = record.exc_info
-                    tb = hide_me(tb, globals())
-                    record.exc_info = a, b, tb
-                result.append(pretty_unicode(formater.format(record)))
-                result.append(u'\n')
-        return u''.join(result)
+from pyspider.processor import ProcessorResult
 
 
 def catch_status_code_error(func):
@@ -103,19 +70,14 @@ def every(minutes=NOTSET, seconds=NOTSET):
     method will been called every minutes or seconds
     """
     def wrapper(func):
-        @functools.wraps(func)
-        def on_cronjob(self, response, task):
-            if (
-                    response.save
-                    and 'tick' in response.save
-                    and response.save['tick'] % (minutes * 60 + seconds) != 0
-            ):
-                return None
-            function = func.__get__(self, self.__class__)
-            return self._run_func(function, response, task)
-        on_cronjob.is_cronjob = True
-        on_cronjob.tick = minutes * 60 + seconds
-        return on_cronjob
+        # mark the function with variable 'is_cronjob=True', the function would be
+        # collected into the list Handler._cron_jobs by meta class
+        func.is_cronjob = True
+
+        # collect interval and unify to seconds, it's used in meta class. See the
+        # comments in meta class.
+        func.tick = minutes * 60 + seconds
+        return func
 
     if inspect.isfunction(minutes):
         func = minutes
@@ -138,7 +100,13 @@ def every(minutes=NOTSET, seconds=NOTSET):
 class BaseHandlerMeta(type):
 
     def __new__(cls, name, bases, attrs):
+        # A list of all functions which is marked as 'is_cronjob=True'
         cron_jobs = []
+
+        # The min_tick is the greatest common divisor(GCD) of the interval of cronjobs
+        # this value would be queried by scheduler when the project initial loaded.
+        # Scheudler may only send _on_cronjob task every min_tick seconds. It can reduce
+        # the number of tasks sent from scheduler.
         min_tick = 0
 
         for each in attrs.values():
@@ -163,6 +131,7 @@ class BaseHandler(object):
     _cron_jobs = []
     _min_tick = 0
     __env__ = {'not_inited': True}
+    retry_delay = {}
 
     def _reset(self):
         """
@@ -185,9 +154,6 @@ class BaseHandler(object):
         Finding callback specified by `task['callback']`
         raising status error for it if needed.
         """
-        self._reset()
-        if isinstance(response, dict):
-            response = rebuild_response(response)
         process = task.get('process', {})
         callback = process.get('callback', '__call__')
         if not hasattr(self, callback):
@@ -210,11 +176,15 @@ class BaseHandler(object):
         exception = None
         stdout = sys.stdout
         self.task = task
+        if isinstance(response, dict):
+            response = rebuild_response(response)
         self.response = response
+        self.save = (task.get('track') or {}).get('save', {})
 
         try:
             if self.__env__.get('enable_stdout_capture', True):
                 sys.stdout = ListO(module.log_buffer)
+            self._reset()
             result = self._run_task(task, response)
             if inspect.isgenerator(result):
                 for r in result:
@@ -225,16 +195,52 @@ class BaseHandler(object):
             logger.exception(e)
             exception = e
         finally:
-            self.task = None
-            self.response = None
-            sys.stdout = stdout
             follows = self._follows
             messages = self._messages
             logs = list(module.log_buffer)
             extinfo = self._extinfo
+            save = self.save
+
+            sys.stdout = stdout
+            self.task = None
+            self.response = None
+            self.save = None
 
         module.log_buffer[:] = []
-        return ProcessorResult(result, follows, messages, logs, exception, extinfo)
+        return ProcessorResult(result, follows, messages, logs, exception, extinfo, save)
+
+    schedule_fields = ('priority', 'retries', 'exetime', 'age', 'itag', 'force_update', 'auto_recrawl', 'cancel')
+    fetch_fields = ('method', 'headers', 'data', 'connect_timeout', 'timeout', 'allow_redirects', 'cookies',
+                    'proxy', 'etag', 'last_modifed', 'last_modified', 'save', 'js_run_at', 'js_script',
+                    'js_viewport_width', 'js_viewport_height', 'load_images', 'fetch_type', 'use_gzip', 'validate_cert',
+                    'max_redirects', 'robots_txt')
+    process_fields = ('callback', )
+
+    @staticmethod
+    def task_join_crawl_config(task, crawl_config):
+        task_fetch = task.get('fetch', {})
+        for k in BaseHandler.fetch_fields:
+            if k in crawl_config:
+                v = crawl_config[k]
+                if isinstance(v, dict) and isinstance(task_fetch.get(k), dict):
+                    task_fetch[k].update(v)
+                else:
+                    task_fetch.setdefault(k, v)
+        if task_fetch:
+            task['fetch'] = task_fetch
+
+        task_process = task.get('process', {})
+        for k in BaseHandler.process_fields:
+            if k in crawl_config:
+                v = crawl_config[k]
+                if isinstance(v, dict) and isinstance(task_process.get(k), dict):
+                    task_process[k].update(v)
+                else:
+                    task_process.setdefault(k, v)
+        if task_process:
+            task['process'] = task_process
+
+        return task
 
     def _crawl(self, url, **kwargs):
         """
@@ -243,6 +249,8 @@ class BaseHandler(object):
         checking kwargs, and repack them to each sub-dict
         """
         task = {}
+
+        assert len(url) < 1024, "Maximum (1024) URL length error."
 
         if kwargs.get('callback'):
             callback = kwargs['callback']
@@ -255,17 +263,17 @@ class BaseHandler(object):
                 raise NotImplementedError("self.%s() not implemented!" % callback)
             if hasattr(func, '_config'):
                 for k, v in iteritems(func._config):
-                    kwargs.setdefault(k, v)
+                    if isinstance(v, dict) and isinstance(kwargs.get(k), dict):
+                        kwargs[k].update(v)
+                    else:
+                        kwargs.setdefault(k, v)
 
-        for k, v in iteritems(self.crawl_config):
-            kwargs.setdefault(k, v)
-
-        url = quote_chinese(_build_url(url.strip(), kwargs.get('params')))
+        url = quote_chinese(_build_url(url.strip(), kwargs.pop('params', None)))
         if kwargs.get('files'):
             assert isinstance(
                 kwargs.get('data', {}), dict), "data must be a dict when using with files!"
-            content_type, data = _encode_multipart_formdata(kwargs.get('data', {}),
-                                                            kwargs.get('files', {}))
+            content_type, data = _encode_multipart_formdata(kwargs.pop('data', {}),
+                                                            kwargs.pop('files', {}))
             kwargs.setdefault('headers', {})
             kwargs['headers']['Content-Type'] = content_type
             kwargs['data'] = data
@@ -275,41 +283,35 @@ class BaseHandler(object):
             kwargs.setdefault('method', 'POST')
 
         schedule = {}
-        for key in ('priority', 'retries', 'exetime', 'age', 'itag', 'force_update'):
-            if key in kwargs and kwargs[key] is not None:
-                schedule[key] = kwargs[key]
+        for key in self.schedule_fields:
+            if key in kwargs:
+                schedule[key] = kwargs.pop(key)
+            elif key in self.crawl_config:
+                schedule[key] = self.crawl_config[key]
+
         task['schedule'] = schedule
 
         fetch = {}
-        for key in (
-                'method',
-                'headers',
-                'data',
-                'timeout',
-                'allow_redirects',
-                'cookies',
-                'proxy',
-                'etag',
-                'last_modifed',
-                'save',
-                'js_run_at',
-                'js_script',
-                'load_images',
-                'fetch_type'
-        ):
-            if key in kwargs and kwargs[key] is not None:
-                fetch[key] = kwargs[key]
+        for key in self.fetch_fields:
+            if key in kwargs:
+                fetch[key] = kwargs.pop(key)
         task['fetch'] = fetch
 
         process = {}
-        for key in ('callback', ):
-            if key in kwargs and kwargs[key] is not None:
-                process[key] = kwargs[key]
+        for key in self.process_fields:
+            if key in kwargs:
+                process[key] = kwargs.pop(key)
         task['process'] = process
 
         task['project'] = self.project_name
         task['url'] = url
-        task['taskid'] = kwargs.get('taskid') or self.get_taskid(task)
+        if 'taskid' in kwargs:
+            task['taskid'] = kwargs.pop('taskid')
+        else:
+            task['taskid'] = self.get_taskid(task)
+
+        if kwargs:
+            raise TypeError('crawl() got unexpected keyword argument: %s' % kwargs.keys())
 
         cache_key = "%(project)s:%(taskid)s" % task
         if cache_key not in self._follows_keys:
@@ -324,7 +326,7 @@ class BaseHandler(object):
     # apis
     def crawl(self, url, **kwargs):
         '''
-        avalable params:
+        available params:
           url
           callback
 
@@ -338,11 +340,14 @@ class BaseHandler(object):
           cookies
           proxy
           etag
-          last_modifed
+          last_modified
+          auto_recrawl
 
           fetch_type
           js_run_at
           js_script
+          js_viewport_width
+          js_viewport_height
           load_images
 
           priority
@@ -350,12 +355,19 @@ class BaseHandler(object):
           exetime
           age
           itag
+          cancel
 
           save
           taskid
 
           full documents: http://pyspider.readthedocs.org/en/latest/apis/self.crawl/
         '''
+
+        if isinstance(url, six.string_types) and url.startswith('curl '):
+            curl_kwargs = curl_to_arguments(url)
+            url = curl_kwargs.pop('urls')
+            for k, v in iteritems(curl_kwargs):
+                kwargs.setdefault(k, v)
 
         if isinstance(url, six.string_types):
             return self._crawl(url, **kwargs)
@@ -394,16 +406,33 @@ class BaseHandler(object):
 
     @not_send_status
     def _on_cronjob(self, response, task):
+        if (not response.save
+                or not isinstance(response.save, dict)
+                or 'tick' not in response.save):
+            return
+
+        # When triggered, a '_on_cronjob' task is sent from scheudler with 'tick' in
+        # Response.save. Scheduler may at least send the trigger task every GCD of the
+        # inverval of the cronjobs. The method should check the tick for each cronjob
+        # function to confirm the execute interval.
         for cronjob in self._cron_jobs:
+            if response.save['tick'] % cronjob.tick != 0:
+                continue
             function = cronjob.__get__(self, self.__class__)
             self._run_func(function, response, task)
 
-    @not_send_status
     def _on_get_info(self, response, task):
         """Sending runtime infomation about this script."""
-        result = {}
-        assert response.save
-        for each in response.save:
+        for each in response.save or []:
             if each == 'min_tick':
-                result[each] = self._min_tick
-        self.crawl('data:,on_get_info', save=result)
+                self.save[each] = self._min_tick
+            elif each == 'retry_delay':
+                if not isinstance(self.retry_delay, dict):
+                    self.retry_delay = {'': self.retry_delay}
+                self.save[each] = self.retry_delay
+            elif each == 'crawl_config':
+                self.save[each] = self.crawl_config
+
+    @not_send_status
+    def on_finished(self, response, task):
+        pass

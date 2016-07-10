@@ -15,13 +15,20 @@ Usage: pyspider [OPTIONS] COMMAND [ARGS]...
 
 Options:
   -c, --config FILENAME    a json file with default values for subcommands.
-                           {"webui": {"port":5001}}
+                           {“webui”: {“port”:5001}}
+  --logging-config TEXT    logging config file for built-in python logging
+                           module  [default: pyspider/pyspider/logging.conf]
   --debug                  debug mode
   --queue-maxsize INTEGER  maxsize of queue
   --taskdb TEXT            database url for taskdb, default: sqlite
   --projectdb TEXT         database url for projectdb, default: sqlite
   --resultdb TEXT          database url for resultdb, default: sqlite
-  --amqp-url TEXT          amqp url for rabbitmq, default: built-in Queue
+  --message-queue TEXT     connection url to message queue, default: builtin
+                           multiprocessing.Queue
+  --amqp-url TEXT          [deprecated] amqp url for rabbitmq. please use
+                           --message-queue instead.
+  --beanstalk TEXT         [deprecated] beanstalk config for beanstalk queue.
+                           please use --message-queue instead.
   --phantomjs-proxy TEXT   phantomjs proxy ip:port
   --data-path TEXT         data dir path
   --version                Show the version and exit.
@@ -37,7 +44,7 @@ Config file is a JSON file with config values for global options or subcommands 
   "taskdb": "mysql+taskdb://username:password@host:port/taskdb",
   "projectdb": "mysql+projectdb://username:password@host:port/projectdb",
   "resultdb": "mysql+resultdb://username:password@host:port/resultdb",
-  "amqp_url": "amqp://username:password@host:port/%2F",
+  "message_queue": "amqp://username:password@host:port/%2F",
   "webui": {
     "username": "some_name",
     "password": "some_passwd",
@@ -77,9 +84,22 @@ type:
 ```
 
 
-#### --amqp-url
+#### --message-queue
 
-See [https://www.rabbitmq.com/uri-spec.html](https://www.rabbitmq.com/uri-spec.html)
+```
+rabbitmq:
+    amqp://username:password@host:5672/%2F
+    see https://www.rabbitmq.com/uri-spec.html
+beanstalk:
+    beanstalk://host:11300/
+redis:
+    redis://host:6379/db
+kombu:
+    kombu+transport://userid:password@hostname:port/virtual_host
+    see http://kombu.readthedocs.org/en/latest/userguide/connections.html#urls
+builtin:
+    None
+```
 
 #### --phantomjs-proxy
 
@@ -123,7 +143,7 @@ Options:
   --help             Show this message and exit.
 ```
 
-**NOTE: webui is not running in one mode.**
+**NOTE: WebUI is not running in one mode.**
 
 In `one` mode, results will be written to stdout by default. You can capture them via `pyspider one > result.txt`.
 
@@ -140,7 +160,7 @@ When SCRIPTS is set, `taskdb` and `resultdb` will use a in-memory sqlite db by d
 
 #### -i, --interactive
 
-With interactive mode, pyspider will start a interactive console asking what to do in next loop of process. In the console, you can use:
+With interactive mode, pyspider will start an interactive console asking what to do in next loop of process. In the console, you can use:
 
 ``` python
 crawl(url, project=None, **kwargs)
@@ -208,15 +228,20 @@ phantomjs
 ---------
 
 ```
-Usage: pyspider phantomjs [OPTIONS]
+Usage: run.py phantomjs [OPTIONS] [ARGS]...
 
   Run phantomjs fetcher if phantomjs is installed.
 
 Options:
   --phantomjs-path TEXT  phantomjs path
   --port INTEGER         phantomjs port
+  --auto-restart TEXT    auto restart phantomjs if crashed
   --help                 Show this message and exit.
 ```
+
+#### ARGS
+
+Addition args pass to phantomjs command line.
 
 fetcher
 -------
@@ -289,7 +314,6 @@ Options:
   --username TEXT        username of lock -ed projects
   --password TEXT        password of lock -ed projects
   --need-auth            need username and password
-  --fetcher-cls TEXT     Fetcher class to be used.
   --webui-instance TEXT  webui Flask Application instance to be used.
   --help                 Show this message and exit.
 ```
@@ -305,3 +329,5 @@ XML-RPC path URI for fetcher XMLRPC server. If not set, use a Fetcher instance.
 #### --need-auth
 
 If true, all pages require username and password specified via `--username` and `--password`.
+
+

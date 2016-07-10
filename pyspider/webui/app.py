@@ -11,25 +11,28 @@ import logging
 logger = logging.getLogger("webui")
 
 from six import reraise
-from six.moves import builtins, urllib
+from six.moves import builtins
+from six.moves.urllib.parse import urljoin
 from flask import Flask
 from pyspider.fetcher import tornado_fetcher
-
 
 if os.name == 'nt':
     import mimetypes
     mimetypes.add_type("text/css", ".css", True)
 
 
-class TornadoFlask(Flask):
-    """Flask object running with tornado ioloop"""
+class QuitableFlask(Flask):
+    """Add quit() method to Flask object"""
 
     @property
     def logger(self):
         return logger
 
     def run(self, host=None, port=None, debug=None, **options):
-        from werkzeug.serving import make_server, run_with_reloader
+        import tornado.wsgi
+        import tornado.ioloop
+        import tornado.httpserver
+        import tornado.web
 
         if host is None:
             host = '127.0.0.1'
@@ -42,7 +45,6 @@ class TornadoFlask(Flask):
         if debug is not None:
             self.debug = bool(debug)
 
-        #run_simple(host, port, self, **options)
         hostname = host
         port = port
         application = self
@@ -53,39 +55,48 @@ class TornadoFlask(Flask):
             from werkzeug.debug import DebuggedApplication
             application = DebuggedApplication(application, True)
 
-        def inner():
-            self.server = make_server(hostname, port, application)
-            self.server.serve_forever()
+        try:
+            from .webdav import dav_app
+        except ImportError as e:
+            logger.warning('WebDav interface not enabled: %r', e)
+            dav_app = None
+        if dav_app:
+            from werkzeug.wsgi import DispatcherMiddleware
+            application = DispatcherMiddleware(application, {
+                '/dav': dav_app
+            })
 
-        if os.environ.get('WERKZEUG_RUN_MAIN') != 'true':
-            display_hostname = hostname != '*' and hostname or 'localhost'
-            if ':' in display_hostname:
-                display_hostname = '[%s]' % display_hostname
-            self.logger.info('webui running on http://%s:%d/', display_hostname, port)
-
+        container = tornado.wsgi.WSGIContainer(application)
+        self.http_server = tornado.httpserver.HTTPServer(container)
+        self.http_server.listen(port, hostname)
         if use_reloader:
-            run_with_reloader(inner)
-        else:
-            inner()
+            from tornado import autoreload
+            autoreload.start()
+
+        self.logger.info('webui running on %s:%s', hostname, port)
+        self.ioloop = tornado.ioloop.IOLoop.current()
+        self.ioloop.start()
 
     def quit(self):
-        if hasattr(self, 'server'):
-            self.server.shutdown_signal = True
+        if hasattr(self, 'ioloop'):
+            self.ioloop.add_callback(self.http_server.stop)
+            self.ioloop.add_callback(self.ioloop.stop)
         self.logger.info('webui exiting...')
 
 
-app = TornadoFlask('webui',
-                   static_folder=os.path.join(os.path.dirname(__file__), 'static'),
-                   template_folder=os.path.join(os.path.dirname(__file__), 'templates'))
+app = QuitableFlask('webui',
+                    static_folder=os.path.join(os.path.dirname(__file__), 'static'),
+                    template_folder=os.path.join(os.path.dirname(__file__), 'templates'))
 app.secret_key = os.urandom(24)
 app.jinja_env.line_statement_prefix = '#'
 app.jinja_env.globals.update(builtins.__dict__)
 
 app.config.update({
-    'fetch': lambda x: tornado_fetcher.Fetcher(None, None, async=False).fetch(x)[1],
+    'fetch': lambda x: tornado_fetcher.Fetcher(None, None, async=False).fetch(x),
     'taskdb': None,
     'projectdb': None,
     'scheduler_rpc': None,
+    'queues': dict(),
 })
 
 
@@ -95,7 +106,7 @@ def cdn_url_handler(error, endpoint, kwargs):
         # cdn = app.config.get('cdn', 'http://cdn.staticfile.org/')
         # cdn = app.config.get('cdn', '//cdnjs.cloudflare.com/ajax/libs/')
         cdn = app.config.get('cdn', '//cdnjscn.b0.upaiyun.com/libs/')
-        return urllib.parse.urljoin(cdn, path)
+        return urljoin(cdn, path)
     else:
         exc_type, exc_value, tb = sys.exc_info()
         if exc_value is error:
